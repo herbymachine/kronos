@@ -179,8 +179,11 @@ add_subdirectory(tools/libchdr)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/tools/libchdr/src)
 set(KRONOS_LIBRARIES ${KRONOS_LIBRARIES} chdr-static)
 
-include_directories(${CMAKE_CURRENT_SOURCE_DIR}/tools/libchdr/deps/zlib-1.2.11)
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/tools/libchdr/deps/zlib-1.3.1)
 set(KRONOS_LIBRARIES ${KRONOS_LIBRARIES} zlibstatic)
+
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/tools/libchdr/deps/zstd-1.5.7/lib)
+set(KRONOS_LIBRARIES ${KRONOS_LIBRARIES} libzstd_static)
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/tools/nanovg)
 set(kronos_SOURCES ${kronos_SOURCES} tools/nanovg/nanovg.c)
