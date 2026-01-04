@@ -88,6 +88,9 @@ int intfstream_getc(intfstream_internal_t *intf);
 int64_t intfstream_seek(intfstream_internal_t *intf,
       int64_t offset, int whence);
 
+int64_t intfstream_truncate(intfstream_internal_t *intf,
+      uint64_t len);
+
 void intfstream_rewind(intfstream_internal_t *intf);
 
 int64_t intfstream_tell(intfstream_internal_t *intf);
@@ -106,6 +109,8 @@ uint32_t intfstream_get_offset_to_start(intfstream_internal_t *intf);
 
 uint32_t intfstream_get_frame_size(intfstream_internal_t *intf);
 
+uint32_t intfstream_get_first_sector(intfstream_internal_t* intf);
+
 bool intfstream_is_compressed(intfstream_internal_t *intf);
 
 bool intfstream_get_crc(intfstream_internal_t *intf, uint32_t *crc);
@@ -116,6 +121,8 @@ intfstream_t *intfstream_open_file(const char *path,
 intfstream_t *intfstream_open_memory(void *data,
       unsigned mode, unsigned hints, uint64_t size);
 
+/* Deprecated.  Has the same effect as `intfstream_open_memory` with
+   a mode including `RETRO_VFS_FILE_ACCESS_WRITE`. */
 intfstream_t *intfstream_open_writable_memory(void *data,
       unsigned mode, unsigned hints, uint64_t size);
 

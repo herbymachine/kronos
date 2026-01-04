@@ -22,6 +22,9 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#if defined(WIIU)
+#include <malloc.h>
+#endif
 
 #include <file/nbio.h>
 #include <encodings/utf.h>
@@ -110,12 +113,15 @@ static void *nbio_stdio_open(const char * filename, unsigned mode)
    if (!f)
       return NULL;
 
-   handle                = (struct nbio_stdio_t*)malloc(sizeof(struct nbio_stdio_t));
+   handle = (struct nbio_stdio_t*)malloc(sizeof(struct nbio_stdio_t));
 
    if (!handle)
-      goto error;
+   {
+      fclose(f);
+      return NULL;
+   }
 
-   handle->f             = f;
+   handle->f = f;
 
    switch (mode)
    {
@@ -130,11 +136,21 @@ static void *nbio_stdio_open(const char * filename, unsigned mode)
 
    handle->mode          = mode;
 
+#if defined(WIIU)
+   /* hit the aligned-buffer fast path on Wii U */
+   if (len)
+      buf                = memalign(0x40, (size_t)len);
+#else
    if (len)
       buf                = malloc((size_t)len);
+#endif
 
    if (len && !buf)
-      goto error;
+   {
+      free(handle);
+      fclose(f);
+      return NULL;
+   }
 
    handle->data          = buf;
    handle->len           = len;
@@ -142,12 +158,6 @@ static void *nbio_stdio_open(const char * filename, unsigned mode)
    handle->op            = -2;
 
    return handle;
-
-error:
-   if (handle)
-      free(handle);
-   fclose(f);
-   return NULL;
 }
 
 static void nbio_stdio_begin_read(void *data)

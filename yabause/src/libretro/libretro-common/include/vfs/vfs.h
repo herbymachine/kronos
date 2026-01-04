@@ -59,10 +59,11 @@ typedef struct
 enum vfs_scheme
 {
    VFS_SCHEME_NONE = 0,
-   VFS_SCHEME_CDROM
+   VFS_SCHEME_CDROM,
+   VFS_SCHEME_SAF
 };
 
-#ifndef __WINRT__
+#if !(defined(__WINRT__) && defined(__cplusplus_winrt))
 #ifdef VFS_FRONTEND
 struct retro_vfs_file_handle
 #else

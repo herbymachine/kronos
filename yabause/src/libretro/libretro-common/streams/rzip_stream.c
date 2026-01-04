@@ -88,59 +88,55 @@ static bool rzipstream_read_file_header(rzipstream_t *stream)
       header_bytes[i] = 0;
 
    /* Attempt to read header bytes */
-   length = filestream_read(stream->file, header_bytes, sizeof(header_bytes));
-   if (length <= 0)
+   if ((length = filestream_read(stream->file,
+        header_bytes, sizeof(header_bytes))) <= 0)
       return false;
 
    /* If file length is less than header size
     * then assume this is uncompressed data */
-   if (length < RZIP_HEADER_SIZE)
-      goto file_uncompressed;
 
    /* Check 'magic numbers' - first 8 bytes
     * of header */
-   if ((header_bytes[0] !=           35) || /* # */
-       (header_bytes[1] !=           82) || /* R */
-       (header_bytes[2] !=           90) || /* Z */
-       (header_bytes[3] !=           73) || /* I */
-       (header_bytes[4] !=           80) || /* P */
-       (header_bytes[5] !=          118) || /* v */
-       (header_bytes[6] != RZIP_VERSION) || /* file format version number */
-       (header_bytes[7] !=           35))   /* # */
-      goto file_uncompressed;
+   if (
+          (length       < RZIP_HEADER_SIZE)
+       || (header_bytes[0] !=           35)  /* # */
+       || (header_bytes[1] !=           82)  /* R */
+       || (header_bytes[2] !=           90)  /* Z */
+       || (header_bytes[3] !=           73)  /* I */
+       || (header_bytes[4] !=           80)  /* P */
+       || (header_bytes[5] !=          118)  /* v */
+       || (header_bytes[6] != RZIP_VERSION)  /* file format version number */
+       || (header_bytes[7] !=           35)) /* # */
+   {
+      /* Reset file to start */
+      filestream_seek(stream->file, 0, SEEK_SET);
+      /* Get 'raw' file size */
+      stream->size          = filestream_get_size(stream->file);
+      stream->is_compressed = false;
+      return true;
+   }
 
    /* Get uncompressed chunk size - next 4 bytes */
-   stream->chunk_size = ((uint32_t)header_bytes[11] << 24) |
-                        ((uint32_t)header_bytes[10] << 16) |
-                        ((uint32_t)header_bytes[9]  <<  8) |
-                         (uint32_t)header_bytes[8];
-   if (stream->chunk_size == 0)
+   if ((stream->chunk_size = (
+                            (uint32_t)header_bytes[11] << 24)
+                         | ((uint32_t)header_bytes[10] << 16)
+                         | ((uint32_t)header_bytes[9]  <<  8)
+                         | (uint32_t)header_bytes[8]) == 0)
       return false;
 
    /* Get total uncompressed data size - next 8 bytes */
-   stream->size = ((uint64_t)header_bytes[19] << 56) |
-                  ((uint64_t)header_bytes[18] << 48) |
-                  ((uint64_t)header_bytes[17] << 40) |
-                  ((uint64_t)header_bytes[16] << 32) |
-                  ((uint64_t)header_bytes[15] << 24) |
-                  ((uint64_t)header_bytes[14] << 16) |
-                  ((uint64_t)header_bytes[13] <<  8) |
-                   (uint64_t)header_bytes[12];
-   if (stream->size == 0)
+   if ((stream->size = (
+                      (uint64_t)header_bytes[19] << 56)
+                   | ((uint64_t)header_bytes[18] << 48)
+                   | ((uint64_t)header_bytes[17] << 40)
+                   | ((uint64_t)header_bytes[16] << 32)
+                   | ((uint64_t)header_bytes[15] << 24)
+                   | ((uint64_t)header_bytes[14] << 16)
+                   | ((uint64_t)header_bytes[13] <<  8)
+                   | (uint64_t)header_bytes[12]) == 0)
       return false;
 
    stream->is_compressed = true;
-   return true;
-
-file_uncompressed:
-
-   /* Reset file to start */
-   filestream_seek(stream->file, 0, SEEK_SET);
-
-   /* Get 'raw' file size */
-   stream->size = filestream_get_size(stream->file);
-
-   stream->is_compressed = false;
    return true;
 }
 
@@ -150,7 +146,6 @@ file_uncompressed:
 static bool rzipstream_write_file_header(rzipstream_t *stream)
 {
    unsigned i;
-   int64_t length;
    uint8_t header_bytes[RZIP_HEADER_SIZE];
 
    if (!stream)
@@ -190,12 +185,8 @@ static bool rzipstream_write_file_header(rzipstream_t *stream)
    filestream_seek(stream->file, 0, SEEK_SET);
 
    /* Write header bytes */
-   length = filestream_write(stream->file,
-         header_bytes, sizeof(header_bytes));
-   if (length != RZIP_HEADER_SIZE)
-      return false;
-
-   return true;
+   return (filestream_write(stream->file,
+         header_bytes, sizeof(header_bytes)) == RZIP_HEADER_SIZE);
 }
 
 /* Stream Initialisation/De-initialisation */
@@ -240,9 +231,8 @@ static bool rzipstream_init_stream(
       file_mode             = RETRO_VFS_FILE_ACCESS_READ;
 
    /* Open file */
-   stream->file = filestream_open(
-         path, file_mode, RETRO_VFS_FILE_ACCESS_HINT_NONE);
-   if (!stream->file)
+   if (!(stream->file = filestream_open(
+         path, file_mode, RETRO_VFS_FILE_ACCESS_HINT_NONE)))
       return false;
 
    /* If file is open for writing, output header
@@ -266,12 +256,10 @@ static bool rzipstream_init_stream(
    if (stream->is_writing)
    {
       /* Compression */
-      stream->deflate_backend = trans_stream_get_zlib_deflate_backend();
-      if (!stream->deflate_backend)
+      if (!(stream->deflate_backend = trans_stream_get_zlib_deflate_backend()))
          return false;
 
-      stream->deflate_stream = stream->deflate_backend->stream_new();
-      if (!stream->deflate_stream)
+      if (!(stream->deflate_stream = stream->deflate_backend->stream_new()))
          return false;
 
       /* Set compression level */
@@ -285,15 +273,15 @@ static bool rzipstream_init_stream(
       stream->in_buf_size  = stream->chunk_size;
       stream->out_buf_size = stream->chunk_size * 2;
       /* > Account for minimum zlib overhead
-       *   of 11 bytes... */ 
+       *   of 11 bytes... */
       stream->out_buf_size =
             (stream->out_buf_size < (stream->in_buf_size + 11)) ?
                   stream->out_buf_size + 11 :
                   stream->out_buf_size;
 
       /* Redundant safety check */
-      if ((stream->in_buf_size == 0) ||
-          (stream->out_buf_size == 0))
+      if (   (stream->in_buf_size  == 0)
+          || (stream->out_buf_size == 0))
          return false;
    }
    /* When reading, don't need an inflate transform
@@ -301,12 +289,10 @@ static bool rzipstream_init_stream(
    else if (stream->is_compressed)
    {
       /* Decompression */
-      stream->inflate_backend = trans_stream_get_zlib_inflate_backend();
-      if (!stream->inflate_backend)
+      if (!(stream->inflate_backend = trans_stream_get_zlib_inflate_backend()))
          return false;
 
-      stream->inflate_stream = stream->inflate_backend->stream_new();
-      if (!stream->inflate_stream)
+      if (!(stream->inflate_stream = stream->inflate_backend->stream_new()))
          return false;
 
       /* Buffers
@@ -323,23 +309,21 @@ static bool rzipstream_init_stream(
       stream->out_buf_size = stream->chunk_size + (stream->chunk_size >> 2);
 
       /* Redundant safety check */
-      if ((stream->in_buf_size == 0) ||
-          (stream->out_buf_size == 0))
+      if (   (stream->in_buf_size  == 0)
+          || (stream->out_buf_size == 0))
          return false;
    }
 
    /* Allocate buffers */
    if (stream->in_buf_size > 0)
    {
-      stream->in_buf = (uint8_t *)calloc(stream->in_buf_size, 1);
-      if (!stream->in_buf)
+      if (!(stream->in_buf = (uint8_t *)calloc(stream->in_buf_size, 1)))
          return false;
    }
 
    if (stream->out_buf_size > 0)
    {
-      stream->out_buf = (uint8_t *)calloc(stream->out_buf_size, 1);
-      if (!stream->out_buf)
+      if (!(stream->out_buf = (uint8_t *)calloc(stream->out_buf_size, 1)))
          return false;
    }
 
@@ -404,19 +388,18 @@ rzipstream_t* rzipstream_open(const char *path, unsigned mode)
    /* Sanity check
     * > Only RETRO_VFS_FILE_ACCESS_READ and
     *   RETRO_VFS_FILE_ACCESS_WRITE are supported */
-   if (string_is_empty(path) ||
-       ((mode != RETRO_VFS_FILE_ACCESS_READ) &&
-        (mode != RETRO_VFS_FILE_ACCESS_WRITE)))
+   if (string_is_empty(path)
+       || (   (mode != RETRO_VFS_FILE_ACCESS_READ)
+           && (mode != RETRO_VFS_FILE_ACCESS_WRITE)))
       return NULL;
 
    /* If opening in read mode, ensure file exists */
-   if ((mode == RETRO_VFS_FILE_ACCESS_READ) &&
-       !path_is_valid(path))
+   if (   (mode == RETRO_VFS_FILE_ACCESS_READ)
+       && !path_is_valid(path))
       return NULL;
 
    /* Allocate stream object */
-   stream = (rzipstream_t*)malloc(sizeof(*stream));
-   if (!stream)
+   if (!(stream = (rzipstream_t*)malloc(sizeof(*stream))))
       return NULL;
 
    stream->is_compressed   = false;
@@ -456,7 +439,6 @@ rzipstream_t* rzipstream_open(const char *path, unsigned mode)
 static bool rzipstream_read_chunk(rzipstream_t *stream)
 {
    unsigned i;
-   int64_t length;
    uint8_t chunk_header_bytes[RZIP_CHUNK_HEADER_SIZE];
    uint32_t compressed_chunk_size;
    uint32_t inflate_read;
@@ -469,16 +451,16 @@ static bool rzipstream_read_chunk(rzipstream_t *stream)
       chunk_header_bytes[i] = 0;
 
    /* Attempt to read chunk header bytes */
-   length = filestream_read(
-         stream->file, chunk_header_bytes, sizeof(chunk_header_bytes));
-   if (length != RZIP_CHUNK_HEADER_SIZE)
+   if (filestream_read(
+         stream->file, chunk_header_bytes, sizeof(chunk_header_bytes)) !=
+         RZIP_CHUNK_HEADER_SIZE)
       return false;
 
    /* Get size of next compressed chunk */
-   compressed_chunk_size = ((uint32_t)chunk_header_bytes[3] << 24) |
-                           ((uint32_t)chunk_header_bytes[2] << 16) |
-                           ((uint32_t)chunk_header_bytes[1] <<  8) |
-                            (uint32_t)chunk_header_bytes[0];
+   compressed_chunk_size = ( (uint32_t)chunk_header_bytes[3]  << 24)
+                           | ((uint32_t)chunk_header_bytes[2] << 16)
+                           | ((uint32_t)chunk_header_bytes[1] <<  8)
+                           | (uint32_t)chunk_header_bytes[0];
    if (compressed_chunk_size == 0)
       return false;
 
@@ -500,9 +482,9 @@ static bool rzipstream_read_chunk(rzipstream_t *stream)
    }
 
    /* Read compressed chunk from file */
-   length = filestream_read(
-         stream->file, stream->in_buf, compressed_chunk_size);
-   if (length != compressed_chunk_size)
+   if (filestream_read(
+         stream->file, stream->in_buf, compressed_chunk_size) !=
+         compressed_chunk_size)
       return false;
 
    /* Decompress chunk data */
@@ -527,8 +509,8 @@ static bool rzipstream_read_chunk(rzipstream_t *stream)
    if (inflate_read != compressed_chunk_size)
       return false;
 
-   if ((inflate_written == 0) ||
-       (inflate_written > stream->out_buf_size))
+   if (   (inflate_written == 0)
+       || (inflate_written > stream->out_buf_size))
       return false;
 
    /* Record current output buffer occupancy
@@ -544,7 +526,7 @@ static bool rzipstream_read_chunk(rzipstream_t *stream)
  * the event of an error */
 int64_t rzipstream_read(rzipstream_t *stream, void *data, int64_t len)
 {
-   int64_t data_len  = len;
+   int64_t _len      = len;
    uint8_t *data_ptr = (uint8_t *)data;
    int64_t data_read = 0;
 
@@ -557,9 +539,9 @@ int64_t rzipstream_read(rzipstream_t *stream, void *data, int64_t len)
       return filestream_read(stream->file, data, len);
 
    /* Process input data */
-   while (data_len > 0)
+   while (_len > 0)
    {
-      uint32_t read_size = 0;
+      int64_t read_size = 0;
 
       /* Check whether we have reached the end
        * of the file */
@@ -576,17 +558,18 @@ int64_t rzipstream_read(rzipstream_t *stream, void *data, int64_t len)
       /* Get amount of data to 'read out' this loop
        * > i.e. minimum of remaining output buffer
        *   occupancy and remaining 'read data' size */
-      read_size = stream->out_buf_occupancy - stream->out_buf_ptr;
-      read_size = (read_size > data_len) ? data_len : read_size;
+      if ((read_size = stream->out_buf_occupancy - stream->out_buf_ptr) >
+            _len)
+         read_size = _len;
 
       /* Copy as much cached data as possible into
        * the read buffer */
-      memcpy(data_ptr, stream->out_buf + stream->out_buf_ptr, read_size);
+      memcpy(data_ptr, stream->out_buf + stream->out_buf_ptr, (size_t)read_size);
 
       /* Increment pointers and remaining length */
       stream->out_buf_ptr += read_size;
       data_ptr            += read_size;
-      data_len            -= read_size;
+      _len                -= read_size;
 
       stream->virtual_ptr += read_size;
 
@@ -640,11 +623,15 @@ char* rzipstream_gets(rzipstream_t *stream, char *s, size_t len)
       c = rzipstream_getc(stream);
 
       /* Check for newline and EOF */
-      if ((c == '\n') || (c == EOF))
+      if (c == EOF)
          break;
 
       /* Copy character to string buffer */
       *str_ptr++ = c;
+
+      /* Check for newline and EOF */
+      if (c == '\n')
+          break;
    }
 
    /* Add NUL termination */
@@ -663,44 +650,37 @@ char* rzipstream_gets(rzipstream_t *stream, char *s, size_t len)
  * - 'buf' will be allocated and must be free()'d manually.
  * - Allocated 'buf' size is equal to 'len'.
  * Returns false in the event of an error */
-bool rzipstream_read_file(const char *path, void **buf, int64_t *len)
+bool rzipstream_read_file(const char *path, void **s, int64_t *len)
 {
    int64_t bytes_read       = 0;
    void *content_buf        = NULL;
    int64_t content_buf_size = 0;
    rzipstream_t *stream     = NULL;
 
-   if (!buf)
+   if (!s)
       return false;
 
    /* Attempt to open file */
-   stream = rzipstream_open(path, RETRO_VFS_FILE_ACCESS_READ);
-
-   if (!stream)
+   if (!(stream = rzipstream_open(path, RETRO_VFS_FILE_ACCESS_READ)))
    {
-      *buf = NULL;
+      *s = NULL;
       return false;
    }
 
    /* Get file size */
-   content_buf_size = rzipstream_get_size(stream);
-
-   if (content_buf_size < 0)
+   if ((content_buf_size = rzipstream_get_size(stream)) < 0)
       goto error;
 
    if ((int64_t)(uint64_t)(content_buf_size + 1) != (content_buf_size + 1))
       goto error;
 
    /* Allocate buffer */
-   content_buf = malloc((size_t)(content_buf_size + 1));
-
-   if (!content_buf)
+   if (!(content_buf = malloc((size_t)(content_buf_size + 1))))
       goto error;
 
    /* Read file contents */
-   bytes_read = rzipstream_read(stream, content_buf, content_buf_size);
-
-   if (bytes_read < 0)
+   if ((bytes_read = rzipstream_read(stream, content_buf, content_buf_size)) <
+         0)
       goto error;
 
    /* Close file */
@@ -712,7 +692,7 @@ bool rzipstream_read_file(const char *path, void **buf, int64_t *len)
    ((char*)content_buf)[bytes_read] = '\0';
 
    /* Assign buffer */
-   *buf = content_buf;
+   *s = content_buf;
 
    /* Assign length value, if required */
    if (len)
@@ -721,7 +701,6 @@ bool rzipstream_read_file(const char *path, void **buf, int64_t *len)
    return true;
 
 error:
-
    if (stream)
       rzipstream_close(stream);
    stream = NULL;
@@ -733,7 +712,7 @@ error:
    if (len)
       *len = -1;
 
-   *buf = NULL;
+   *s = NULL;
 
    return false;
 }
@@ -745,7 +724,6 @@ error:
 static bool rzipstream_write_chunk(rzipstream_t *stream)
 {
    unsigned i;
-   int64_t length;
    uint8_t chunk_header_bytes[RZIP_CHUNK_HEADER_SIZE];
    uint32_t deflate_read;
    uint32_t deflate_written;
@@ -778,8 +756,8 @@ static bool rzipstream_write_chunk(rzipstream_t *stream)
    if (deflate_read != stream->in_buf_ptr)
       return false;
 
-   if ((deflate_written == 0) ||
-       (deflate_written > stream->out_buf_size))
+   if (   (deflate_written == 0)
+       || (deflate_written > stream->out_buf_size))
       return false;
 
    /* Write compressed chunk size to file */
@@ -788,16 +766,14 @@ static bool rzipstream_write_chunk(rzipstream_t *stream)
    chunk_header_bytes[1] = (deflate_written >>  8) & 0xFF;
    chunk_header_bytes[0] =  deflate_written        & 0xFF;
 
-   length = filestream_write(
-         stream->file, chunk_header_bytes, sizeof(chunk_header_bytes));
-   if (length != RZIP_CHUNK_HEADER_SIZE)
+   if (filestream_write(
+         stream->file, chunk_header_bytes, sizeof(chunk_header_bytes)) !=
+         RZIP_CHUNK_HEADER_SIZE)
       return false;
 
    /* Write compressed data to file */
-   length = filestream_write(
-         stream->file, stream->out_buf, deflate_written);
-
-   if (length != deflate_written)
+   if (filestream_write(
+         stream->file, stream->out_buf, deflate_written) != deflate_written)
       return false;
 
    /* Reset input buffer pointer */
@@ -811,16 +787,16 @@ static bool rzipstream_write_chunk(rzipstream_t *stream)
  * in the event of an error */
 int64_t rzipstream_write(rzipstream_t *stream, const void *data, int64_t len)
 {
-   int64_t data_len        = len;
+   int64_t _len = len;
    const uint8_t *data_ptr = (const uint8_t *)data;
 
    if (!stream || !stream->is_writing || !data)
       return -1;
 
    /* Process input data */
-   while (data_len > 0)
+   while (_len > 0)
    {
-      uint32_t cache_size = 0;
+      int64_t cache_size = 0;
 
       /* If input buffer is full, compress and write to disk */
       if (stream->in_buf_ptr >= stream->in_buf_size)
@@ -830,17 +806,17 @@ int64_t rzipstream_write(rzipstream_t *stream, const void *data, int64_t len)
       /* Get amount of data to cache during this loop
        * > i.e. minimum of space remaining in input buffer
        *   and remaining 'write data' size */
-      cache_size = stream->in_buf_size - stream->in_buf_ptr;
-      cache_size = (cache_size > data_len) ? data_len : cache_size;
+      if ((cache_size = stream->in_buf_size - stream->in_buf_ptr) > _len)
+         cache_size = _len;
 
       /* Copy as much data as possible into
        * the input buffer */
-      memcpy(stream->in_buf + stream->in_buf_ptr, data_ptr, cache_size);
+      memcpy(stream->in_buf + stream->in_buf_ptr, data_ptr, (size_t)cache_size);
 
       /* Increment pointers and remaining length */
       stream->in_buf_ptr  += cache_size;
       data_ptr            += cache_size;
-      data_len            -= cache_size;
+      _len                -= cache_size;
 
       stream->size        += cache_size;
       stream->virtual_ptr += cache_size;
@@ -858,12 +834,10 @@ int64_t rzipstream_write(rzipstream_t *stream, const void *data, int64_t len)
 int rzipstream_putc(rzipstream_t *stream, int c)
 {
    char c_char = (char)c;
-
-   if (!stream || !stream->is_writing)
-      return EOF;
-
-   return (rzipstream_write(stream, &c_char, 1) == 1) ?
-         (int)(unsigned char)c : EOF;
+   if (   stream && stream->is_writing
+         && (rzipstream_write(stream, &c_char, 1) == 1))
+      return (int)(unsigned char)c;
+   return EOF;
 }
 
 /* Writes a variable argument list to an RZIP file.
@@ -874,15 +848,13 @@ int rzipstream_putc(rzipstream_t *stream, int c)
 int rzipstream_vprintf(rzipstream_t *stream, const char* format, va_list args)
 {
    static char buffer[8 * 1024] = {0};
-   int64_t num_chars            = vsnprintf(buffer,
+   int _len = vsnprintf(buffer,
          sizeof(buffer), format, args);
-
-   if (num_chars < 0)
+   if (_len < 0)
       return -1;
-   else if (num_chars == 0)
+   else if (_len == 0)
       return 0;
-
-   return (int)rzipstream_write(stream, buffer, num_chars);
+   return (int)rzipstream_write(stream, buffer, _len);
 }
 
 /* Writes formatted output to an RZIP file.
@@ -891,18 +863,18 @@ int rzipstream_vprintf(rzipstream_t *stream, const char* format, va_list args)
 int rzipstream_printf(rzipstream_t *stream, const char* format, ...)
 {
    va_list vl;
-   int result = 0;
+   int ret = 0;
 
    /* Initialise variable argument list */
    va_start(vl, format);
 
    /* Write variable argument list to file */
-   result = rzipstream_vprintf(stream, format, vl);
+   ret = rzipstream_vprintf(stream, format, vl);
 
    /* End using variable argument list */
    va_end(vl);
 
-   return result;
+   return ret;
 }
 
 /* Writes contents of 'data' buffer to file
@@ -917,9 +889,7 @@ bool rzipstream_write_file(const char *path, const void *data, int64_t len)
       return false;
 
    /* Attempt to open file */
-   stream = rzipstream_open(path, RETRO_VFS_FILE_ACCESS_WRITE);
-
-   if (!stream)
+   if (!(stream = rzipstream_open(path, RETRO_VFS_FILE_ACCESS_WRITE)))
       return false;
 
    /* Write contents of data buffer to file */
@@ -931,10 +901,7 @@ bool rzipstream_write_file(const char *path, const void *data, int64_t len)
 
    /* Check that the correct number of bytes
     * were written */
-   if (bytes_written != len)
-      return false;
-
-   return true;
+   return (bytes_written == len);
 }
 
 /* File Control */
@@ -975,12 +942,7 @@ void rzipstream_rewind(rzipstream_t *stream)
       /* Reset file position to first chunk location */
       filestream_seek(stream->file, RZIP_HEADER_SIZE, SEEK_SET);
       if (filestream_error(stream->file))
-      {
-         fprintf(
-               stderr,
-               "rzipstream_rewind(): Failed to reset file position...\n");
          return;
-      }
 
       /* Reset pointers */
       stream->virtual_ptr = 0;
@@ -1009,21 +971,11 @@ void rzipstream_rewind(rzipstream_t *stream)
          /* Reset file position to first chunk location */
          filestream_seek(stream->file, RZIP_HEADER_SIZE, SEEK_SET);
          if (filestream_error(stream->file))
-         {
-            fprintf(
-                  stderr,
-                  "rzipstream_rewind(): Failed to reset file position...\n");
             return;
-         }
 
          /* Read chunk */
          if (!rzipstream_read_chunk(stream))
-         {
-            fprintf(
-                  stderr,
-                  "rzipstream_rewind(): Failed to read first chunk of file...\n");
             return;
-         }
 
          /* Reset pointers */
          stream->virtual_ptr = 0;
@@ -1070,17 +1022,16 @@ int64_t rzipstream_tell(rzipstream_t *stream)
    if (!stream)
       return -1;
 
-   return (int64_t)stream->virtual_ptr;
+   if (stream->is_compressed)
+      return (int64_t)stream->virtual_ptr;
+   return filestream_tell(stream->file);
 }
 
 /* Returns true if specified RZIP file contains
  * compressed content */
 bool rzipstream_is_compressed(rzipstream_t *stream)
 {
-   if (!stream)
-      return false;
-
-   return stream->is_compressed;
+   return stream && stream->is_compressed;
 }
 
 /* File Close */
@@ -1098,20 +1049,17 @@ int rzipstream_close(rzipstream_t *stream)
     * disk and update file header */
    if (stream->is_writing)
    {
-      if (stream->in_buf_ptr > 0)
-         if (!rzipstream_write_chunk(stream))
-            goto error;
-
-      if (!rzipstream_write_file_header(stream))
-         goto error;
+      if (    ((stream->in_buf_ptr > 0)
+            && !rzipstream_write_chunk(stream))
+            || !rzipstream_write_file_header(stream))
+      {
+         /* Stream must be free()'d regardless */
+         rzipstream_free_stream(stream);
+         return -1;
+      }
    }
 
    /* Free stream
     * > This also closes the file */
    return rzipstream_free_stream(stream);
-
-error:
-   /* Stream must be free()'d regardless */
-   rzipstream_free_stream(stream);
-   return -1;
 }

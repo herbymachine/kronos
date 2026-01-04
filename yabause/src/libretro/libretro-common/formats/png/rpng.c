@@ -82,6 +82,13 @@ struct idat_buffer
    size_t size;
 };
 
+enum rpng_process_flags
+{
+   RPNG_PROCESS_FLAG_INFLATE_INITIALIZED    = (1 << 0),
+   RPNG_PROCESS_FLAG_ADAM7_PASS_INITIALIZED = (1 << 1),
+   RPNG_PROCESS_FLAG_PASS_INITIALIZED       = (1 << 2)
+};
+
 struct rpng_process
 {
    uint32_t *data;
@@ -106,9 +113,16 @@ struct rpng_process
    unsigned pass_width;
    unsigned pass_height;
    unsigned pass_pos;
-   bool inflate_initialized;
-   bool adam7_pass_initialized;
-   bool pass_initialized;
+   uint8_t flags;
+};
+
+enum rpng_flags
+{
+   RPNG_FLAG_HAS_IHDR = (1 << 0),
+   RPNG_FLAG_HAS_IDAT = (1 << 1),
+   RPNG_FLAG_HAS_IEND = (1 << 2),
+   RPNG_FLAG_HAS_PLTE = (1 << 3),
+   RPNG_FLAG_HAS_TRNS = (1 << 4)
 };
 
 struct rpng
@@ -119,14 +133,10 @@ struct rpng
    struct idat_buffer idat_buf; /* ptr alignment */
    struct png_ihdr ihdr; /* uint32 alignment */
    uint32_t palette[256];
-   bool has_ihdr;
-   bool has_idat;
-   bool has_iend;
-   bool has_plte;
-   bool has_trns;
+   uint8_t flags;
 };
 
-static const struct adam7_pass passes[] = {
+static const struct adam7_pass rpng_passes[] = {
    { 0, 0, 8, 8 },
    { 4, 0, 8, 8 },
    { 0, 4, 4, 8 },
@@ -136,15 +146,14 @@ static const struct adam7_pass passes[] = {
    { 0, 1, 1, 2 },
 };
 
-static INLINE uint32_t dword_be(const uint8_t *buf)
+static INLINE uint32_t rpng_dword_be(const uint8_t *buf)
 {
    return (buf[0] << 24) | (buf[1] << 16) | (buf[2] << 8) | (buf[3] << 0);
 }
 
 #if defined(DEBUG) || defined(RPNG_TEST)
-static bool png_process_ihdr(struct png_ihdr *ihdr)
+static bool rpng_process_ihdr(struct png_ihdr *ihdr)
 {
-   unsigned i;
    uint8_t ihdr_depth = ihdr->depth;
 
    switch (ihdr->color_type)
@@ -154,7 +163,7 @@ static bool png_process_ihdr(struct png_ihdr *ihdr)
       case PNG_IHDR_COLOR_RGBA:
          if (ihdr_depth != 8 && ihdr_depth != 16)
          {
-            fprintf(stderr, "[RPNG]: Error in line %d.\n", __LINE__);
+            fprintf(stderr, "[RPNG] Error in line %d.\n", __LINE__);
             return false;
          }
          break;
@@ -162,7 +171,7 @@ static bool png_process_ihdr(struct png_ihdr *ihdr)
          /* Valid bitdepths are: 1, 2, 4, 8, 16 */
          if (ihdr_depth > 16 || (0x977F7FFF << ihdr_depth) & 0x80000000)
          {
-            fprintf(stderr, "[RPNG]: Error in line %d.\n", __LINE__);
+            fprintf(stderr, "[RPNG] Error in line %d.\n", __LINE__);
             return false;
          }
          break;
@@ -170,12 +179,12 @@ static bool png_process_ihdr(struct png_ihdr *ihdr)
          /* Valid bitdepths are: 1, 2, 4, 8 */
          if (ihdr_depth > 8 || (0x977F7FFF << ihdr_depth)  & 0x80000000)
          {
-            fprintf(stderr, "[RPNG]: Error in line %d.\n", __LINE__);
+            fprintf(stderr, "[RPNG] Error in line %d.\n", __LINE__);
             return false;
          }
          break;
       default:
-         fprintf(stderr, "[RPNG]: Error in line %d.\n", __LINE__);
+         fprintf(stderr, "[RPNG] Error in line %d.\n", __LINE__);
          return false;
    }
 
@@ -191,7 +200,7 @@ static bool png_process_ihdr(struct png_ihdr *ihdr)
    return true;
 }
 #else
-static bool png_process_ihdr(struct png_ihdr *ihdr)
+static bool rpng_process_ihdr(struct png_ihdr *ihdr)
 {
    uint8_t ihdr_depth = ihdr->depth;
 
@@ -221,14 +230,14 @@ static bool png_process_ihdr(struct png_ihdr *ihdr)
 }
 #endif
 
-static void png_reverse_filter_copy_line_rgb(uint32_t *data,
+static void rpng_reverse_filter_copy_line_rgb(uint32_t *data,
       const uint8_t *decoded, unsigned width, unsigned bpp)
 {
-   unsigned i;
+   int i;
 
    bpp /= 8;
 
-   for (i = 0; i < width; i++)
+   for (i = 0; i < (int)width; i++)
    {
       uint32_t r, g, b;
 
@@ -242,14 +251,14 @@ static void png_reverse_filter_copy_line_rgb(uint32_t *data,
    }
 }
 
-static void png_reverse_filter_copy_line_rgba(uint32_t *data,
+static void rpng_reverse_filter_copy_line_rgba(uint32_t *data,
       const uint8_t *decoded, unsigned width, unsigned bpp)
 {
-   unsigned i;
+   int i;
 
    bpp /= 8;
 
-   for (i = 0; i < width; i++)
+   for (i = 0; i < (int)width; i++)
    {
       uint32_t r, g, b, a;
       r        = *decoded;
@@ -264,16 +273,17 @@ static void png_reverse_filter_copy_line_rgba(uint32_t *data,
    }
 }
 
-static void png_reverse_filter_copy_line_bw(uint32_t *data,
+static void rpng_reverse_filter_copy_line_bw(uint32_t *data,
       const uint8_t *decoded, unsigned width, unsigned depth)
 {
-   unsigned i, bit;
+   int i;
+   unsigned bit;
    static const unsigned mul_table[] = { 0, 0xff, 0x55, 0, 0x11, 0, 0, 0, 0x01 };
    unsigned mul, mask;
 
    if (depth == 16)
    {
-      for (i = 0; i < width; i++)
+      for (i = 0; i < (int)width; i++)
       {
          uint32_t val = decoded[i << 1];
          data[i]      = (val * 0x010101) | (0xffu << 24);
@@ -285,7 +295,7 @@ static void png_reverse_filter_copy_line_bw(uint32_t *data,
    mask = (1 << depth) - 1;
    bit  = 0;
 
-   for (i = 0; i < width; i++, bit += depth)
+   for (i = 0; i < (int)width; i++, bit += depth)
    {
       unsigned byte = bit >> 3;
       unsigned val  = decoded[byte] >> (8 - depth - (bit & 7));
@@ -296,15 +306,15 @@ static void png_reverse_filter_copy_line_bw(uint32_t *data,
    }
 }
 
-static void png_reverse_filter_copy_line_gray_alpha(uint32_t *data,
+static void rpng_reverse_filter_copy_line_gray_alpha(uint32_t *data,
       const uint8_t *decoded, unsigned width,
       unsigned bpp)
 {
-   unsigned i;
+   int i;
 
    bpp /= 8;
 
-   for (i = 0; i < width; i++)
+   for (i = 0; i < (int)width; i++)
    {
       uint32_t gray, alpha;
 
@@ -317,7 +327,7 @@ static void png_reverse_filter_copy_line_gray_alpha(uint32_t *data,
    }
 }
 
-static void png_reverse_filter_copy_line_plt(uint32_t *data,
+static void rpng_reverse_filter_copy_line_plt(uint32_t *data,
       const uint8_t *decoded, unsigned width,
       unsigned depth, const uint32_t *palette)
 {
@@ -325,10 +335,9 @@ static void png_reverse_filter_copy_line_plt(uint32_t *data,
    {
       case 1:
          {
+            int i;
             unsigned w = width / 8;
-            unsigned i;
-
-            for (i = 0; i < w; i++, decoded++)
+            for (i = 0; i < (int)w; i++, decoded++)
             {
                *data++ = palette[(*decoded >> 7) & 1];
                *data++ = palette[(*decoded >> 6) & 1];
@@ -363,10 +372,9 @@ static void png_reverse_filter_copy_line_plt(uint32_t *data,
 
       case 2:
          {
+            int i;
             unsigned w = width / 4;
-            unsigned i;
-
-            for (i = 0; i < w; i++, decoded++)
+            for (i = 0; i < (int)w; i++, decoded++)
             {
                *data++ = palette[(*decoded >> 6) & 3];
                *data++ = palette[(*decoded >> 4) & 3];
@@ -389,10 +397,9 @@ static void png_reverse_filter_copy_line_plt(uint32_t *data,
 
       case 4:
          {
+            int i;
             unsigned w = width / 2;
-            unsigned i;
-
-            for (i = 0; i < w; i++, decoded++)
+            for (i = 0; i < (int)w; i++, decoded++)
             {
                *data++ = palette[*decoded >> 4];
                *data++ = palette[*decoded & 0x0f];
@@ -405,16 +412,15 @@ static void png_reverse_filter_copy_line_plt(uint32_t *data,
 
       case 8:
          {
-            unsigned i;
-
-            for (i = 0; i < width; i++, decoded++, data++)
+            int i;
+            for (i = 0; i < (int)width; i++, decoded++, data++)
                *data = palette[*decoded];
          }
          break;
    }
 }
 
-static void png_pass_geom(const struct png_ihdr *ihdr,
+static void rpng_pass_geom(const struct png_ihdr *ihdr,
       unsigned width, unsigned height,
       unsigned *bpp_out, unsigned *pitch_out, size_t *pass_size)
 {
@@ -455,7 +461,7 @@ static void png_pass_geom(const struct png_ihdr *ihdr,
       *pitch_out = pitch;
 }
 
-static void png_reverse_filter_adam7_deinterlace_pass(uint32_t *data,
+static void rpng_reverse_filter_adam7_deinterlace_pass(uint32_t *data,
       const struct png_ihdr *ihdr,
       const uint32_t *input, unsigned pass_width, unsigned pass_height,
       const struct adam7_pass *pass)
@@ -474,7 +480,7 @@ static void png_reverse_filter_adam7_deinterlace_pass(uint32_t *data,
    }
 }
 
-static void png_reverse_filter_deinit(struct rpng_process *pngp)
+static void rpng_reverse_filter_deinit(struct rpng_process *pngp)
 {
    if (!pngp)
       return;
@@ -485,37 +491,37 @@ static void png_reverse_filter_deinit(struct rpng_process *pngp)
       free(pngp->prev_scanline);
    pngp->prev_scanline    = NULL;
 
-   pngp->pass_initialized = false;
+   pngp->flags           &= ~RPNG_PROCESS_FLAG_PASS_INITIALIZED;
    pngp->h                = 0;
 }
 
-static int png_reverse_filter_init(const struct png_ihdr *ihdr,
+static int rpng_reverse_filter_init(const struct png_ihdr *ihdr,
       struct rpng_process *pngp)
 {
    size_t pass_size;
 
-   if (!pngp->adam7_pass_initialized && ihdr->interlace)
+   if (   !(pngp->flags & RPNG_PROCESS_FLAG_ADAM7_PASS_INITIALIZED)
+         && ihdr->interlace)
    {
-      if (ihdr->width <= passes[pngp->pass_pos].x ||
-            ihdr->height <= passes[pngp->pass_pos].y) /* Empty pass */
+      if (     ihdr->width  <= rpng_passes[pngp->pass_pos].x
+            || ihdr->height <= rpng_passes[pngp->pass_pos].y) /* Empty pass */
          return 1;
 
       pngp->pass_width  = (ihdr->width -
-            passes[pngp->pass_pos].x + passes[pngp->pass_pos].stride_x - 1) / passes[pngp->pass_pos].stride_x;
-      pngp->pass_height = (ihdr->height - passes[pngp->pass_pos].y +
-            passes[pngp->pass_pos].stride_y - 1) / passes[pngp->pass_pos].stride_y;
+            rpng_passes[pngp->pass_pos].x + rpng_passes[pngp->pass_pos].stride_x
+- 1) / rpng_passes[pngp->pass_pos].stride_x;
+      pngp->pass_height = (ihdr->height - rpng_passes[pngp->pass_pos].y +
+            rpng_passes[pngp->pass_pos].stride_y - 1) / rpng_passes[pngp->pass_pos].stride_y;
 
-      pngp->data = (uint32_t*)malloc(
-            pngp->pass_width * pngp->pass_height * sizeof(uint32_t));
-
-      if (!pngp->data)
+      if (!(pngp->data = (uint32_t*)malloc(
+            pngp->pass_width * pngp->pass_height * sizeof(uint32_t))))
          return -1;
 
       pngp->ihdr        = *ihdr;
       pngp->ihdr.width  = pngp->pass_width;
       pngp->ihdr.height = pngp->pass_height;
 
-      png_pass_geom(&pngp->ihdr, pngp->pass_width,
+      rpng_pass_geom(&pngp->ihdr, pngp->pass_width,
             pngp->pass_height, NULL, NULL, &pngp->pass_size);
 
       if (pngp->pass_size > pngp->total_out)
@@ -525,15 +531,15 @@ static int png_reverse_filter_init(const struct png_ihdr *ihdr,
          return -1;
       }
 
-      pngp->adam7_pass_initialized = true;
+      pngp->flags |= RPNG_PROCESS_FLAG_ADAM7_PASS_INITIALIZED;
 
       return 0;
    }
 
-   if (pngp->pass_initialized)
+   if (pngp->flags & RPNG_PROCESS_FLAG_PASS_INITIALIZED)
       return 0;
 
-   png_pass_geom(ihdr, ihdr->width, ihdr->height, &pngp->bpp, &pngp->pitch, &pass_size);
+   rpng_pass_geom(ihdr, ihdr->width, ihdr->height, &pngp->bpp, &pngp->pitch, &pass_size);
 
    if (pngp->total_out < pass_size)
       return -1;
@@ -546,17 +552,18 @@ static int png_reverse_filter_init(const struct png_ihdr *ihdr,
    if (!pngp->prev_scanline || !pngp->decoded_scanline)
       goto error;
 
-   pngp->h = 0;
-   pngp->pass_initialized = true;
+   pngp->h                    = 0;
+   pngp->flags               |= RPNG_PROCESS_FLAG_PASS_INITIALIZED;
 
    return 0;
 
 error:
-   png_reverse_filter_deinit(pngp);
+   rpng_reverse_filter_deinit(pngp);
    return -1;
 }
 
-static int png_reverse_filter_copy_line(uint32_t *data, const struct png_ihdr *ihdr,
+static int rpng_reverse_filter_copy_line(uint32_t *data,
+      const struct png_ihdr *ihdr,
       struct rpng_process *pngp, unsigned filter)
 {
    unsigned i;
@@ -567,35 +574,36 @@ static int png_reverse_filter_copy_line(uint32_t *data, const struct png_ihdr *i
          memcpy(pngp->decoded_scanline, pngp->inflate_buf, pngp->pitch);
          break;
       case PNG_FILTER_SUB:
-         for (i = 0; i < pngp->bpp; i++)
-            pngp->decoded_scanline[i] = pngp->inflate_buf[i];
+         memcpy(pngp->decoded_scanline, pngp->inflate_buf, pngp->pitch);
          for (i = pngp->bpp; i < pngp->pitch; i++)
-            pngp->decoded_scanline[i] = pngp->decoded_scanline[i - pngp->bpp] + pngp->inflate_buf[i];
+            pngp->decoded_scanline[i] += pngp->decoded_scanline[i - pngp->bpp];
          break;
       case PNG_FILTER_UP:
+         memcpy(pngp->decoded_scanline, pngp->inflate_buf, pngp->pitch);
          for (i = 0; i < pngp->pitch; i++)
-            pngp->decoded_scanline[i] = pngp->prev_scanline[i] + pngp->inflate_buf[i];
+            pngp->decoded_scanline[i] += pngp->prev_scanline[i];
          break;
       case PNG_FILTER_AVERAGE:
+         memcpy(pngp->decoded_scanline, pngp->inflate_buf, pngp->pitch);
          for (i = 0; i < pngp->bpp; i++)
          {
             uint8_t avg = pngp->prev_scanline[i] >> 1;
-            pngp->decoded_scanline[i] = avg + pngp->inflate_buf[i];
+            pngp->decoded_scanline[i] += avg;
          }
          for (i = pngp->bpp; i < pngp->pitch; i++)
          {
             uint8_t avg = (pngp->decoded_scanline[i - pngp->bpp] + pngp->prev_scanline[i]) >> 1;
-            pngp->decoded_scanline[i] = avg + pngp->inflate_buf[i];
+            pngp->decoded_scanline[i] += avg;
          }
          break;
       case PNG_FILTER_PAETH:
+         memcpy(pngp->decoded_scanline, pngp->inflate_buf, pngp->pitch);
          for (i = 0; i < pngp->bpp; i++)
-            pngp->decoded_scanline[i] = paeth(0, pngp->prev_scanline[i], 0) + pngp->inflate_buf[i];
+            pngp->decoded_scanline[i] += pngp->prev_scanline[i];
          for (i = pngp->bpp; i < pngp->pitch; i++)
-            pngp->decoded_scanline[i] = paeth(pngp->decoded_scanline[i - pngp->bpp],
-                  pngp->prev_scanline[i], pngp->prev_scanline[i - pngp->bpp]) + pngp->inflate_buf[i];
+            pngp->decoded_scanline[i] += paeth(pngp->decoded_scanline[i - pngp->bpp],
+                  pngp->prev_scanline[i], pngp->prev_scanline[i - pngp->bpp]);
          break;
-
       default:
          return IMAGE_PROCESS_ERROR_END;
    }
@@ -603,21 +611,22 @@ static int png_reverse_filter_copy_line(uint32_t *data, const struct png_ihdr *i
    switch (ihdr->color_type)
    {
       case PNG_IHDR_COLOR_GRAY:
-         png_reverse_filter_copy_line_bw(data, pngp->decoded_scanline, ihdr->width, ihdr->depth);
+         rpng_reverse_filter_copy_line_bw(data, pngp->decoded_scanline, ihdr->width, ihdr->depth);
          break;
       case PNG_IHDR_COLOR_RGB:
-         png_reverse_filter_copy_line_rgb(data, pngp->decoded_scanline, ihdr->width, ihdr->depth);
+         rpng_reverse_filter_copy_line_rgb(data, pngp->decoded_scanline, ihdr->width, ihdr->depth);
          break;
       case PNG_IHDR_COLOR_PLT:
-         png_reverse_filter_copy_line_plt(data, pngp->decoded_scanline, ihdr->width,
+         rpng_reverse_filter_copy_line_plt(
+               data, pngp->decoded_scanline, ihdr->width,
                ihdr->depth, pngp->palette);
          break;
       case PNG_IHDR_COLOR_GRAY_ALPHA:
-         png_reverse_filter_copy_line_gray_alpha(data, pngp->decoded_scanline, ihdr->width,
+         rpng_reverse_filter_copy_line_gray_alpha(data, pngp->decoded_scanline, ihdr->width,
                ihdr->depth);
          break;
       case PNG_IHDR_COLOR_RGBA:
-         png_reverse_filter_copy_line_rgba(data, pngp->decoded_scanline, ihdr->width, ihdr->depth);
+         rpng_reverse_filter_copy_line_rgba(data, pngp->decoded_scanline, ihdr->width, ihdr->depth);
          break;
    }
 
@@ -626,20 +635,21 @@ static int png_reverse_filter_copy_line(uint32_t *data, const struct png_ihdr *i
    return IMAGE_PROCESS_NEXT;
 }
 
-static int png_reverse_filter_regular_iterate(uint32_t **data, const struct png_ihdr *ihdr,
+static int rpng_reverse_filter_regular_iterate(
+      uint32_t **data, const struct png_ihdr *ihdr,
       struct rpng_process *pngp)
 {
    int ret = IMAGE_PROCESS_END;
-
    if (pngp->h < ihdr->height)
    {
-      unsigned filter = *pngp->inflate_buf++;
+      unsigned filter         = *pngp->inflate_buf++;
       pngp->restore_buf_size += 1;
-      ret = png_reverse_filter_copy_line(*data,
+      ret                     = rpng_reverse_filter_copy_line(*data,
             ihdr, pngp, filter);
+      if (ret == IMAGE_PROCESS_END || ret == IMAGE_PROCESS_ERROR_END)
+         goto end;
    }
-
-   if (ret == IMAGE_PROCESS_END || ret == IMAGE_PROCESS_ERROR_END)
+   else
       goto end;
 
    pngp->h++;
@@ -652,7 +662,7 @@ static int png_reverse_filter_regular_iterate(uint32_t **data, const struct png_
    return IMAGE_PROCESS_NEXT;
 
 end:
-   png_reverse_filter_deinit(pngp);
+   rpng_reverse_filter_deinit(pngp);
 
    pngp->inflate_buf -= pngp->restore_buf_size;
    *data             -= pngp->data_restore_buf_size;
@@ -660,30 +670,28 @@ end:
    return ret;
 }
 
-static int png_reverse_filter_adam7_iterate(uint32_t **data_,
+static int rpng_reverse_filter_adam7_iterate(uint32_t **data_,
       const struct png_ihdr *ihdr,
       struct rpng_process *pngp)
 {
    int        ret = 0;
-   bool   to_next = pngp->pass_pos < ARRAY_SIZE(passes);
+   bool   to_next = pngp->pass_pos < ARRAY_SIZE(rpng_passes);
    uint32_t *data = *data_;
 
    if (!to_next)
       return IMAGE_PROCESS_END;
 
-   ret = png_reverse_filter_init(ihdr, pngp);
-
-   if (ret == 1)
+   if ((ret = rpng_reverse_filter_init(ihdr, pngp)) == 1)
       return IMAGE_PROCESS_NEXT;
-   if (ret == -1)
+   else if (ret == -1)
       return IMAGE_PROCESS_ERROR_END;
 
-   if (png_reverse_filter_init(&pngp->ihdr, pngp) == -1)
+   if (rpng_reverse_filter_init(&pngp->ihdr, pngp) == -1)
       return IMAGE_PROCESS_ERROR;
 
    do
    {
-      ret = png_reverse_filter_regular_iterate(&pngp->data,
+      ret = rpng_reverse_filter_regular_iterate(&pngp->data,
             &pngp->ihdr, pngp);
    } while (ret == IMAGE_PROCESS_NEXT);
 
@@ -695,25 +703,26 @@ static int png_reverse_filter_adam7_iterate(uint32_t **data_,
 
    pngp->total_out              -= pngp->pass_size;
 
-   png_reverse_filter_adam7_deinterlace_pass(data,
-         ihdr, pngp->data, pngp->pass_width, pngp->pass_height, &passes[pngp->pass_pos]);
+   rpng_reverse_filter_adam7_deinterlace_pass(data,
+         ihdr, pngp->data, pngp->pass_width, pngp->pass_height,
+         &rpng_passes[pngp->pass_pos]);
 
    free(pngp->data);
 
-   pngp->data = NULL;
-   pngp->pass_width  = 0;
-   pngp->pass_height = 0;
-   pngp->pass_size   = 0;
-   pngp->adam7_pass_initialized = false;
+   pngp->data                   = NULL;
+   pngp->pass_width             = 0;
+   pngp->pass_height            = 0;
+   pngp->pass_size              = 0;
+   pngp->flags                 &= ~RPNG_PROCESS_FLAG_ADAM7_PASS_INITIALIZED;
 
    return IMAGE_PROCESS_NEXT;
 }
 
-static int png_reverse_filter_adam7(uint32_t **data_,
+static int rpng_reverse_filter_adam7(uint32_t **data_,
       const struct png_ihdr *ihdr,
       struct rpng_process *pngp)
 {
-   int ret = png_reverse_filter_adam7_iterate(data_,
+   int ret = rpng_reverse_filter_adam7_iterate(data_,
          ihdr, pngp);
 
    switch (ret)
@@ -740,21 +749,11 @@ static int png_reverse_filter_adam7(uint32_t **data_,
    return ret;
 }
 
-static int png_reverse_filter_iterate(rpng_t *rpng, uint32_t **data)
-{
-   if (!rpng)
-      return false;
-
-   if (rpng->ihdr.interlace && rpng->process)
-      return png_reverse_filter_adam7(data, &rpng->ihdr, rpng->process);
-
-   return png_reverse_filter_regular_iterate(data, &rpng->ihdr, rpng->process);
-}
-
-static int rpng_load_image_argb_process_inflate_init(rpng_t *rpng, uint32_t **data)
+static int rpng_load_image_argb_process_inflate_init(
+      rpng_t *rpng, uint32_t **data)
 {
    bool zstatus;
-   enum trans_stream_error terror;
+   enum trans_stream_error err;
    uint32_t rd, wn;
    struct rpng_process *process = (struct rpng_process*)rpng->process;
    bool to_continue        = (process->avail_in > 0
@@ -763,16 +762,16 @@ static int rpng_load_image_argb_process_inflate_init(rpng_t *rpng, uint32_t **da
    if (!to_continue)
       goto end;
 
-   zstatus = process->stream_backend->trans(process->stream, false, &rd, &wn, &terror);
+   zstatus = process->stream_backend->trans(process->stream, false, &rd, &wn, &err);
 
-   if (!zstatus && terror != TRANS_STREAM_ERROR_BUFFER_FULL)
+   if (!zstatus && err != TRANS_STREAM_ERROR_BUFFER_FULL)
       goto error;
 
    process->avail_in -= rd;
    process->avail_out -= wn;
    process->total_out += wn;
 
-   if (terror)
+   if (err)
       return 0;
 
 end:
@@ -795,45 +794,19 @@ end:
    process->palette                = rpng->palette;
 
    if (rpng->ihdr.interlace != 1)
-      if (png_reverse_filter_init(&rpng->ihdr, process) == -1)
+      if (rpng_reverse_filter_init(&rpng->ihdr, process) == -1)
          goto false_end;
 
-   process->inflate_initialized = true;
+   process->flags              |=  RPNG_PROCESS_FLAG_INFLATE_INITIALIZED;
    return 1;
 
 error:
 false_end:
-   process->inflate_initialized = false;
+   process->flags              &= ~RPNG_PROCESS_FLAG_INFLATE_INITIALIZED;
    return -1;
 }
 
-static bool png_read_plte(uint8_t *buf,
-      uint32_t *buffer, unsigned entries)
-{
-   unsigned i;
-
-   for (i = 0; i < entries; i++)
-   {
-      uint32_t r = buf[3 * i + 0];
-      uint32_t g = buf[3 * i + 1];
-      uint32_t b = buf[3 * i + 2];
-      buffer[i] = (r << 16) | (g << 8) | (b << 0) | (0xffu << 24);
-   }
-
-   return true;
-}
-
-static bool png_read_trns(uint8_t *buf, uint32_t *palette, unsigned entries)
-{
-   unsigned i;
-
-   for (i = 0; i < entries; i++, buf++, palette++)
-      *palette = (*palette & 0x00ffffff) | (unsigned)*buf << 24;
-
-   return true;
-}
-
-bool png_realloc_idat(struct idat_buffer *buf, uint32_t chunk_size)
+static bool rpng_realloc_idat(struct idat_buffer *buf, uint32_t chunk_size)
 {
    uint8_t *new_buffer = (uint8_t*)realloc(buf->data, buf->size + chunk_size);
 
@@ -852,9 +825,7 @@ static struct rpng_process *rpng_process_init(rpng_t *rpng)
    if (!process)
       return NULL;
 
-   process->inflate_initialized    = false;
-   process->adam7_pass_initialized = false;
-   process->pass_initialized       = false;
+   process->flags                  = 0;
    process->prev_scanline          = NULL;
    process->decoded_scanline       = NULL;
    process->inflate_buf            = NULL;
@@ -886,7 +857,7 @@ static struct rpng_process *rpng_process_init(rpng_t *rpng)
    process->stream                 = NULL;
    process->stream_backend         = trans_stream_get_zlib_inflate_backend();
 
-   png_pass_geom(&rpng->ihdr, rpng->ihdr.width,
+   rpng_pass_geom(&rpng->ihdr, rpng->ihdr.width,
          rpng->ihdr.height, NULL, NULL, &process->inflate_buf_size);
    if (rpng->ihdr.interlace == 1) /* To be sure. */
       process->inflate_buf_size *= 2;
@@ -928,10 +899,18 @@ error:
    return NULL;
 }
 
-static enum png_chunk_type read_chunk_header(
+/**
+ * rpng_read_chunk_header:
+ *
+ * Leaf function.
+ *
+ * @return The PNG type of the memory chunk (i.e. IHDR, IDAT, IEND,
+   PLTE, and/or tRNS)
+ **/
+static enum png_chunk_type rpng_read_chunk_header(
       uint8_t *buf, uint32_t chunk_size)
 {
-   unsigned i;
+   int i;
    char type[4];
 
    for (i = 0; i < 4; i++)
@@ -945,7 +924,7 @@ static enum png_chunk_type read_chunk_header(
       type[i]      = byte;
    }
 
-   if (     
+   if (
             type[0] == 'I'
          && type[1] == 'H'
          && type[2] == 'D'
@@ -1003,13 +982,13 @@ bool rpng_iterate_image(rpng_t *rpng)
    if (rpng->buff_end - buf < 8)
       return false;
 
-   chunk_size = dword_be(buf);
+   chunk_size = rpng_dword_be(buf);
 
    /* Check whether chunk will overflow the data buffer */
    if (buf + 8 + chunk_size > rpng->buff_end)
       return false;
 
-   switch (read_chunk_header(buf, chunk_size))
+   switch (rpng_read_chunk_header(buf, chunk_size))
    {
       case PNG_CHUNK_NOOP:
       default:
@@ -1019,7 +998,9 @@ bool rpng_iterate_image(rpng_t *rpng)
          return false;
 
       case PNG_CHUNK_IHDR:
-         if (rpng->has_ihdr || rpng->has_idat || rpng->has_iend)
+         if (     (rpng->flags & RPNG_FLAG_HAS_IHDR)
+               || (rpng->flags & RPNG_FLAG_HAS_IDAT)
+               || (rpng->flags & RPNG_FLAG_HAS_IEND))
             return false;
 
          if (chunk_size != 13)
@@ -1027,83 +1008,97 @@ bool rpng_iterate_image(rpng_t *rpng)
 
          buf                    += 4 + 4;
 
-         rpng->ihdr.width        = dword_be(buf + 0);
-         rpng->ihdr.height       = dword_be(buf + 4);
+         rpng->ihdr.width        = rpng_dword_be(buf + 0);
+         rpng->ihdr.height       = rpng_dword_be(buf + 4);
          rpng->ihdr.depth        = buf[8];
          rpng->ihdr.color_type   = buf[9];
          rpng->ihdr.compression  = buf[10];
          rpng->ihdr.filter       = buf[11];
          rpng->ihdr.interlace    = buf[12];
 
-         if (     rpng->ihdr.width  == 0 
-               || rpng->ihdr.height == 0)
+         if (     rpng->ihdr.width  == 0
+               || rpng->ihdr.height == 0
+               /* ensure multiplications don't overflow and wrap around, that'd give buffer overflow crashes */
+               || (uint64_t)rpng->ihdr.width*rpng->ihdr.height*sizeof(uint32_t) >= 0x80000000)
             return false;
 
-         if (!png_process_ihdr(&rpng->ihdr))
+         if (!rpng_process_ihdr(&rpng->ihdr))
             return false;
 
          if (rpng->ihdr.compression != 0)
          {
 #if defined(DEBUG) || defined(RPNG_TEST)
-            fprintf(stderr, "[RPNG]: Error in line %d.\n", __LINE__);
+            fprintf(stderr, "[RPNG] Error in line %d.\n", __LINE__);
 #endif
             return false;
          }
 
-         rpng->has_ihdr = true;
+         rpng->flags   |= RPNG_FLAG_HAS_IHDR;
          break;
 
       case PNG_CHUNK_PLTE:
          {
+            int i;
             unsigned entries = chunk_size / 3;
 
-            if (     !rpng->has_ihdr 
-                  ||  rpng->has_plte 
-                  ||  rpng->has_iend 
-                  ||  rpng->has_idat
-                  ||  rpng->has_trns)
+            if (entries > 256)
                return false;
-
             if (chunk_size % 3)
                return false;
 
-            if (entries > 256)
+            if (     !(rpng->flags & RPNG_FLAG_HAS_IHDR)
+                  ||  (rpng->flags & RPNG_FLAG_HAS_PLTE)
+                  ||  (rpng->flags & RPNG_FLAG_HAS_IEND)
+                  ||  (rpng->flags & RPNG_FLAG_HAS_IDAT)
+                  ||  (rpng->flags & RPNG_FLAG_HAS_TRNS))
                return false;
 
             buf += 8;
 
-            if (!png_read_plte(buf, rpng->palette, entries))
-               return false;
+            for (i = 0; i < (int)entries; i++)
+            {
+               uint32_t r       = buf[3 * i + 0];
+               uint32_t g       = buf[3 * i + 1];
+               uint32_t b       = buf[3 * i + 2];
+               rpng->palette[i] = (r << 16) | (g << 8) | (b << 0) | (0xffu << 24);
+            }
 
-            rpng->has_plte = true;
+            rpng->flags        |= RPNG_FLAG_HAS_PLTE;
          }
          break;
 
       case PNG_CHUNK_tRNS:
-         if (rpng->has_idat)
+         if (rpng->flags & RPNG_FLAG_HAS_IDAT)
             return false;
 
          if (rpng->ihdr.color_type == PNG_IHDR_COLOR_PLT)
          {
+            int i;
+            uint32_t *palette;
             /* we should compare with the number of palette entries */
             if (chunk_size > 256)
                return false;
 
-            buf += 8;
+            buf    += 8;
+            palette = rpng->palette;
 
-            if (!png_read_trns(buf, rpng->palette, chunk_size))
-               return false;
+            for (i = 0; i < (int)chunk_size; i++, buf++, palette++)
+               *palette = (*palette & 0x00ffffff) | (unsigned)*buf << 24;
          }
          /* TODO: support colorkey in grayscale and truecolor images */
 
-         rpng->has_trns = true;
+         rpng->flags         |= RPNG_FLAG_HAS_TRNS;
          break;
 
       case PNG_CHUNK_IDAT:
-         if (!(rpng->has_ihdr) || rpng->has_iend || (rpng->ihdr.color_type == PNG_IHDR_COLOR_PLT && !(rpng->has_plte)))
+         if (     !(rpng->flags & RPNG_FLAG_HAS_IHDR)
+               ||  (rpng->flags & RPNG_FLAG_HAS_IEND)
+               ||  (rpng->ihdr.color_type == PNG_IHDR_COLOR_PLT
+                  &&
+                  !(rpng->flags & RPNG_FLAG_HAS_PLTE)))
             return false;
 
-         if (!png_realloc_idat(&rpng->idat_buf, chunk_size))
+         if (!rpng_realloc_idat(&rpng->idat_buf, chunk_size))
             return false;
 
          buf += 8;
@@ -1113,14 +1108,15 @@ bool rpng_iterate_image(rpng_t *rpng)
 
          rpng->idat_buf.size += chunk_size;
 
-         rpng->has_idat = true;
+         rpng->flags         |= RPNG_FLAG_HAS_IDAT;
          break;
 
       case PNG_CHUNK_IEND:
-         if (!(rpng->has_ihdr) || !(rpng->has_idat))
+         if (     !(rpng->flags & RPNG_FLAG_HAS_IHDR)
+               || !(rpng->flags & RPNG_FLAG_HAS_IDAT))
             return false;
 
-         rpng->has_iend = true;
+         rpng->flags         |= RPNG_FLAG_HAS_IEND;
          return false;
    }
 
@@ -1133,11 +1129,9 @@ bool rpng_iterate_image(rpng_t *rpng)
 }
 
 int rpng_process_image(rpng_t *rpng,
-      void **_data, size_t size, unsigned *width, unsigned *height)
+      void **_data, size_t len, unsigned *width, unsigned *height)
 {
    uint32_t **data = (uint32_t**)_data;
-
-   (void)size;
 
    if (!rpng->process)
    {
@@ -1150,7 +1144,7 @@ int rpng_process_image(rpng_t *rpng,
       return IMAGE_PROCESS_NEXT;
    }
 
-   if (!rpng->process->inflate_initialized)
+   if (!(rpng->process->flags & RPNG_PROCESS_FLAG_INFLATE_INITIALIZED))
    {
       if (rpng_load_image_argb_process_inflate_init(rpng, data) == -1)
          goto error;
@@ -1160,7 +1154,9 @@ int rpng_process_image(rpng_t *rpng,
    *width  = rpng->ihdr.width;
    *height = rpng->ihdr.height;
 
-   return png_reverse_filter_iterate(rpng, data);
+   if (rpng->ihdr.interlace && rpng->process)
+      return rpng_reverse_filter_adam7(data, &rpng->ihdr, rpng->process);
+   return rpng_reverse_filter_regular_iterate(data, &rpng->ihdr, rpng->process);
 
 error:
    if (rpng->process)
@@ -1170,6 +1166,7 @@ error:
       if (rpng->process->stream)
          rpng->process->stream_backend->stream_free(rpng->process->stream);
       free(rpng->process);
+      rpng->process = NULL;
    }
    return IMAGE_PROCESS_ERROR;
 }
@@ -1208,8 +1205,7 @@ bool rpng_start(rpng_t *rpng)
    if (rpng->buff_end - rpng->buff_data < 8)
       return false;
 
-   if (string_is_not_equal_fast(
-            rpng->buff_data, png_magic, sizeof(png_magic)))
+   if (memcmp(rpng->buff_data, png_magic, sizeof(png_magic)) != 0)
       return false;
 
    rpng->buff_data += 8;
@@ -1217,14 +1213,21 @@ bool rpng_start(rpng_t *rpng)
    return true;
 }
 
+/**
+ * rpng_is_valid:
+ *
+ * Check if @rpng is a valid PNG image.
+ * Must contain an IHDR chunk, one or more IDAT
+ * chunks, and an IEND chunk.
+ *
+ * Leaf function.
+ *
+ * @return true if it's a valid PNG image, otherwise false.
+ **/
 bool rpng_is_valid(rpng_t *rpng)
 {
-   /* A valid PNG image must contain an IHDR chunk,
-    * one or more IDAT chunks, and an IEND chunk */
-   if (rpng && rpng->has_ihdr && rpng->has_idat && rpng->has_iend)
-      return true;
-
-   return false;
+   return (rpng && ((rpng->flags & (RPNG_FLAG_HAS_IHDR | RPNG_FLAG_HAS_IDAT |
+RPNG_FLAG_HAS_IEND)) > 0));
 }
 
 bool rpng_set_buf_ptr(rpng_t *rpng, void *data, size_t len)
